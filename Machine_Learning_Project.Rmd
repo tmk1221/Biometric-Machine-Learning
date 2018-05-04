@@ -1,0 +1,232 @@
+---
+title: "Human Activity Classification With Biometric Machine Learning"
+author: "Travis M Kassab"
+date: "4/27/2018"
+output:
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    theme: paper
+    highlight: espresso
+  pandoc_args: [
+      "--number-sections",
+    ]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(ggplot2)
+library(corrplot)
+library(kableExtra)
+
+#Parallel processing with 3 of 4 Macbook Air cores
+library(parallel)
+library(doParallel)
+
+#Packages for models
+library(rpart)
+library(ipred)
+library(e1071)
+library(randomForest)
+library(gbm)
+```
+
+```{r include=FALSE}
+#Train data download and read
+URL1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+destfile1 <- "/Users/traviskassab/Documents/Data Science Johns Hopkins/Machine_Learning/Train_Data"
+
+if(!file.exists(destfile1)){
+        download.file(URL1,destfile1,method="curl")
+        train <- read.csv("./Train_Data", 
+                          na.strings=c("NA","#DIV/0!",""))
+        } else{
+                 train <- read.csv("./Train_Data", 
+                                   na.strings=c("NA","#DIV/0!",""))
+        }
+
+
+#Test data download and read
+URL2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+destfile2 <- "/Users/traviskassab/Documents/Data Science Johns Hopkins/Machine_Learning/Test_Data"
+
+if(!file.exists(destfile2)){
+        download.file(URL2,destfile2,method="curl")
+        test <- read.csv("./Test_Data", 
+                         na.strings=c("NA","#DIV/0!",""))
+        } else{
+                 test <- read.csv("./Test_Data", 
+                                  na.strings=c("NA","#DIV/0!",""))
+        }
+
+levels(test[,2]) <- c("Adelmo", "Carlitos", "Charles", "Eurico", "Jeremy", "Pedro")
+
+test.subjects <- as.character(test[,2])
+
+access.time <- Sys.time()
+```
+
+#Introduction
+The goal of this research study is to develop a machine learning algorithm that can classify how well a dumbbell curl is being performed.The training and test data sets were downloaded on _`r access.time`_. 
+
+The original study defines 5 classes of performance:
+
+**Class A:** _the correct performance_
+
+**Class B:** _incorrectly throwing elbows in front_
+
+**Class C:** _only lifting halfways up_
+
+**Class D:** _only lowering halfways down_
+
+**Class E:** _incorrectly throwing hips forward_
+
+#Data Cleaning
+The data was cleaned with the following steps.
+
+**1.** _Removal of time stamp and other variables related to data acquisition_
+
+**2.** _Predictors removed with majority missing values_
+
+**3.** _All predictor variables coerced to class numeric_
+
+**4.** _Check for zero and near-zero variance predictors (remove if any)_
+
+**5.** _Remove highly correlated predictors (R > .9)_
+
+```{r include=FALSE, echo=FALSE}
+#Remove variables related to data acquisition
+train <- train[,-c(1:7)]
+test <- test[,-c(1:7)]
+
+#Remove variables with majority blank or NA values
+bad.var <- sapply(colnames(train), function(x) if(sum(is.na(train[, x]))/nrow(train) >= 0.5) {return(TRUE)
+} else{
+return(FALSE)
+}
+)
+
+train <- train[, !bad.var]
+test <- test[, !bad.var]
+
+#Coerce all remaining predictors to numeric (except for 'classe')
+train[,-53] <- sapply(train[,-53], as.numeric)
+test[,-53] <- sapply(test[,-53], as.numeric)
+
+#Check for zero/near-zero varaince predictors
+nearZeroVar(train, saveMetrics= TRUE)
+
+#Remove predictors with correlations above .9
+correlates <- findCorrelation(cor(train[,-53]), cutoff=.9)
+train <- train[,-correlates]
+test <- test[,-correlates]
+```
+
+```{r}
+corrplot(cor(train[,-46]), tl.col = "black", tl.cex = .75)
+```
+
+
+The plot below shows the predictor space that models will be fit to. This space has been cleaned for highly co linear variables.
+
+
+#Machine Learning Modeling
+This report fits four non-parametric models (decision trees and DT variants) and one parametric model (linear discriminant analysis).
+
+##Non-Parametric Model Building
+
+```{r echo=FALSE}
+set.seed(1221)
+
+#Set cross-validation as resampling method for parameter tuning
+tc <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+
+#Establish parallel processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+
+###Regular Classification Tree
+
+```{r cache = TRUE}
+#Regular Classification Tree
+tree <- train(classe ~., data=train, method = "rpart", trControl = tc)
+```
+
+
+###Bagged Classification Tree
+Regular decision trees suffer from a high degree of variance. Their predictions are highly dependent on the particular data that they are trained on. One way to reduce this variance is through _bootstrap aggregation_ (or "bagging").
+
+This method repeatedly samples from the training data and fits a decision tree to each sample. Each of these trees produces a prediction for any given observation. Classes are assigned to observations based on a majority vote of all the predictions. This averaging of predictions across different bootstrapped samples greatly reduces a decision tree's inherent variance. 
+```{r cache = TRUE}
+#Bagged Classification Tree
+bag_tree <- train(classe ~., data=train, method = "treebag", trControl = tc)
+```
+
+
+###Random Forest Classification Tree
+Bagging tends to produce highly correlated trees. The trees tend to build themselves similarly on each bootstrapped sample.
+
+Random forests utilize this bootstrap aggregation; however, they consider a random subset of predictors to split on at each node, whereas the above two trees consider all remaining predictors at each node. In this way, trees are not allowed to build in a similar manner each time. This works to decorrelate the decision trees which is more effective in reducing model variance.
+```{r cache = TRUE}
+#Random Forest Classification Tree
+rf_tree <- train(classe ~., data=train, method = "rf", trControl = tc)
+```
+
+
+###Boosted Classification Tree
+```{r cache = TRUE}
+#Stochastic Gradient Boosting Tree Classification
+boost_tree <- train(classe ~., data=train, method = "gbm", verbose = FALSE)
+```
+
+```{r echo=FALSE}
+#Return to single-core processing
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+##Parametric Model Building
+
+###Linear Discriminant Analysis
+```{r}
+lda <- train(classe ~., data=train, method = "lda", trControl = tc)
+```
+
+#Prediction
+```{r echo=FALSE}
+rf_var <- sort(rf_tree$results$Accuracy, decreasing = T)[1]
+tree_var <- sort(tree$results$Accuracy, decreasing = T)[1]
+bag_var <- sort(bag_tree$results$Accuracy, decreasing = T)[1]
+boost_var <- sort(boost_tree$results$Accuracy, decreasing = T)[1]
+lda_var <- sort(lda$results$Accuracy, decreasing = T)[1]
+
+vars <- round(c(rf_var, tree_var, bag_var, boost_var, lda_var),3)
+names <- c("Random Forest", "Regular Tree", "Bagged Tree", "Boost Tree", "Linear Discriminant")
+
+acu <- data.frame(names, vars)
+
+ggplot(data=acu, aes(x=reorder(acu[,1], -acu[,2]), y=acu[,2])) + geom_bar(stat="identity", col = "goldenrod", fill = "goldenrod", aes(alpha = acu[,2]), show.legend=F) + labs(title = "Algorithm Accuracies", x="Machine Learning Algorithm", y="Accuracy") + scale_y_continuous(labels = scales::percent) + theme_minimal() + geom_label(col = "midnightblue", aes(label=paste0(acu[,2]*100, "%")), vjust = .5, size = 3)
+```
+
+The Random Forest model performs best with a classification accuracy of 99.5%. This is the model that we will use to make predictions on the test set.
+
+```{r results = "asis", echo = FALSE}
+df<-data.frame("Test Subjects" = test.subjects, "Class" = as.character(predict(rf_tree, test)))
+
+kable(df, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+#Conclusion
+Movement data from weight lifters was used to predict how well the lifter performed an exercise. Did they use the proper technique?
+
+4 non-parametric decision trees were fit along with one parametric linear discriminant analysis. The Random Forest model performed best with a Bagged Tree and Boosted Tree following closely (in terms of predictive power). The regular Decision Tree performed worse, exhibiting an accuracy of roughly 50%. 
+
+
+#References
+
+*Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+*Gareth James, Daniela Witten, Trevor Hastie, and Robert Tibshirani. 2014. An Introduction to Statistical Learning: With Applications in R. Springer Publishing Company, Incorporated.
